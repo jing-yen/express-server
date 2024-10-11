@@ -27,10 +27,198 @@ app.get('/api/inventory', async (req, res) => {
         const allInventory = await pool.query("SELECT * FROM hub_items_unique WHERE loanable = 'true'");
         res.json(allInventory.rows);
     } catch (err) {
-        console.error(err.message);
+        console.error(err);
         res.status(500).send("Server error");
     }
 });
+
+app.get('/api/inventoryE2A', async (req, res) => {
+    try {
+        // Adjusted SQL query to only select items where loanable is 'Yes'
+        const allInventory = await pool.query("SELECT * FROM e2a_items_unique WHERE loanable = 'true'");
+        res.json(allInventory.rows);
+    } catch (err) {
+        console.error(err);
+        res.status(500).send("Server error");
+    }
+});
+
+app.get('/api/loan-details/:loan_id', async (req, res) => {
+    try {
+        const { loan_id } = req.params;
+        const loanDetails = await pool.query(
+            `SELECT 
+                lt.transaction_id, 
+                s.name AS student_name, 
+                s.email AS student_email,
+                s.phone_number AS student_phone,
+                lt.start_usage_date, 
+                lt.end_usage_date, 
+                lt.status, 
+                json_agg(
+                    json_build_object(
+                        'item_name', COALESCE(hi.item_name, hi2.item_name),
+                        'quantity', COALESCE(li.quantity, li2.quantity)
+                    )
+                ) AS loan_items
+            FROM 
+                loan_transaction lt
+            JOIN 
+                students s ON lt.student_id = s.student_id
+            LEFT JOIN 
+                loan_items li ON lt.transaction_id = li.transaction_id
+            LEFT JOIN 
+                hub_items_unique hi ON li.item_id = hi.item_id
+            LEFT JOIN 
+                loan_items_e2a li2 ON lt.transaction_id = li2.transaction_id
+            LEFT JOIN 
+                e2a_items_unique hi2 ON li2.item_id = hi2.item_id 
+            WHERE 
+                (UPPER(lt.hash) = UPPER($1) OR (lt.hash is NULL AND (lt.transaction_id)::TEXT = $1))
+            GROUP BY 
+                lt.transaction_id, s.name, s.email, s.phone_number, lt.start_usage_date, lt.end_usage_date, lt.status;
+            `,
+            [loan_id]
+        );
+
+        if (loanDetails.rows.length > 0) {
+            res.json(loanDetails.rows[0]);
+        } else {
+            res.status(404).send("Loan details not found");
+        }
+    } catch (err) {
+        console.error(err);
+        res.status(500).send("Server error");
+    }
+});
+
+app.get('/api/loan-transactions', async (req, res) => {
+    try {
+      const query = `
+        SELECT 
+            lt.transaction_id, 
+            s.name AS student_name, 
+            s.email AS student_email,
+            s.phone_number AS student_phone,
+            lt.remarks,
+            lt.updated_by,
+            lt.start_usage_date, 
+            lt.end_usage_date, 
+            lt.status, 
+            json_agg(
+                json_build_object(
+                    'item_name', COALESCE(hi.item_name, hi2.item_name),
+                    'quantity', COALESCE(li.quantity, li2.quantity)
+                )
+            ) AS loan_items
+        FROM 
+            loan_transaction lt
+        JOIN 
+            students s ON lt.student_id = s.student_id
+        LEFT JOIN 
+            loan_items li ON lt.transaction_id = li.transaction_id
+        LEFT JOIN 
+            hub_items_unique hi ON li.item_id = hi.item_id
+        LEFT JOIN 
+            loan_items_e2a li2 ON lt.transaction_id = li2.transaction_id
+        LEFT JOIN 
+            e2a_items_unique hi2 ON li2.item_id = hi2.item_id 
+        GROUP BY 
+            lt.transaction_id, s.name, s.email, s.phone_number, lt.start_usage_date, lt.end_usage_date, lt.status;
+
+      `;
+  
+      const results = await pool.query(query);
+      res.status(200).json(results.rows);
+    } catch (err) {
+      console.error(err.stack);
+      res.status(500).json({ error: 'Server error' });
+    }
+  });
+
+
+  app.get('/api/loan-transactions-overdue', async (req, res) => {
+    try {
+      const query = `
+        SELECT 
+            lt.transaction_id, 
+            s.name AS student_name, 
+            s.email AS student_email,
+            s.phone_number AS student_phone,
+            lt.remarks,
+            lt.updated_by,
+            lt.start_usage_date, 
+            lt.end_usage_date, 
+            lt.status,
+            lt.hash,
+            COALESCE(
+                json_agg(
+                    json_build_object('item_name', hi.item_name, 'quantity', li.quantity)
+                ) FILTER (WHERE li.loan_item_id IS NOT NULL), '[]'
+            ) AS loan_items
+        FROM 
+            loan_transaction lt
+        LEFT JOIN 
+            students s ON lt.student_id = s.student_id
+        LEFT JOIN 
+            loan_items li ON lt.transaction_id = li.transaction_id
+        LEFT JOIN 
+            hub_items_unique hi ON li.item_id = hi.item_id
+        WHERE 
+            lt.end_usage_date < CURRENT_DATE AND lt.status = 'Borrowed'
+        GROUP BY 
+            lt.transaction_id, s.name, s.email, s.phone_number, lt.start_usage_date, lt.end_usage_date, lt.status;
+      `;
+  
+      const results = await pool.query(query);
+      res.status(200).json(results.rows);
+    } catch (err) {
+      console.error(err.stack);
+      res.status(500).json({ error: 'Server error' });
+    }
+  });
+
+  app.get('/api/loan-transactions-expiring', async (req, res) => {
+    try {
+      const query = `
+        SELECT 
+            lt.transaction_id, 
+            s.name AS student_name, 
+            s.email AS student_email,
+            s.phone_number AS student_phone,
+            lt.remarks,
+            lt.updated_by,
+            lt.start_usage_date, 
+            lt.end_usage_date, 
+            lt.status, 
+            lt.hash,
+            COALESCE(
+                json_agg(
+                    json_build_object('item_name', hi.item_name, 'quantity', li.quantity)
+                ) FILTER (WHERE li.loan_item_id IS NOT NULL), '[]'
+            ) AS loan_items
+        FROM 
+            loan_transaction lt
+        LEFT JOIN 
+            students s ON lt.student_id = s.student_id
+        LEFT JOIN 
+            loan_items li ON lt.transaction_id = li.transaction_id
+        LEFT JOIN 
+            hub_items_unique hi ON li.item_id = hi.item_id
+        WHERE 
+            lt.end_usage_date = CURRENT_DATE + INTERVAL '1 day'
+        GROUP BY 
+            lt.transaction_id, s.name, s.email, s.phone_number, lt.start_usage_date, lt.end_usage_date, lt.status;
+
+      `;
+  
+      const results = await pool.query(query);
+      res.status(200).json(results.rows);
+    } catch (err) {
+      console.error(err.stack);
+      res.status(500).json({ error: 'Server error' });
+    }
+  });
 
 // Endpoint to get size_specs and model by item_id
 app.get('/api/item-details/:item_id', async (req, res) => {
@@ -142,6 +330,27 @@ app.put('/api/inventory/:item_id', async (req, res) => {
     }
 });
 
+// For retrieving details of a specific inventory item from E2A by its ID
+app.get('/api/inventoryE2A/:item_id', async (req, res) => {
+    try {
+        // Extract the ID from the request parameters
+        const { item_id } = req.params;
+
+        // Perform a SELECT operation in the database using provided ID
+        const item = await pool.query(
+            "SELECT * FROM e2a_items_unique WHERE item_id = $1", [item_id]
+        );
+
+        // Check if the item was found
+        if (item.rows.length === 0) {
+            return res.status(404).json({ message: "Item not found" });
+        }
+        res.json(item.rows[0]);
+    } catch (err) {
+        console.error(err.message);
+        res.status(500).send("Server error");
+    }
+});
 
 
 // To validate the received data, check inventory availability, and update the database accordingly.
@@ -415,6 +624,14 @@ app.post('/api/loan-transaction/add', async (req, res) => {
             [studentIdFromDB, start_usage_date, end_usage_date, status, email, phoneNumberFromDB]
         );
 
+        // Generate the hash for the transaction_id (safer)
+        const updatedTransaction = await pool.query(
+            "UPDATE loan_transaction SET hash = id_encode(transaction_id, '', 6, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890') WHERE transaction_id = $1 RETURNING *",
+            [newLoanTransaction.rows[0].transaction_id]
+        );
+
+        newLoanTransaction.rows[0].hash = updatedTransaction.rows[0].hash;
+
         // Send back the inserted loan transaction data
         res.json(newLoanTransaction.rows[0]);
     } catch (err) {
@@ -423,8 +640,75 @@ app.post('/api/loan-transaction/add', async (req, res) => {
     }
 });
 
+app.post('/api/loan-item/add', async (req, res) => {
+    const { transaction_id, item_id, quantity, status, remarks, location } = req.body;
+  
+    try {
+      // Validate required fields
+      if (!transaction_id || !item_id || !quantity || !status) {
+        return res.status(400).json({ error: 'Missing required fields' });
+      }
+      console.log("Received loan item data:", req.body);
+      console.log(transaction_id);
+  
+      // Insert the loan item into the database using pool.query
+      const newLoanItem = await pool.query(
+        "INSERT INTO " + (location=='hub' ? "loan_items" : "loan_items_e2a") + " (transaction_id, item_id, quantity, status, remarks) VALUES ($1, $2, $3, $4, $5) RETURNING *",
+        [transaction_id, item_id, quantity, status, remarks]
+      );
+  
+      // Return the created loan item
+      return res.status(201).json(newLoanItem.rows[0]);
+  
+    } catch (err) {
+      console.error(err.stack);
+      return res.status(500).json({ error: 'Server error' });
+    }
+  });
 
+  app.post('/api/loan-status/update', async (req, res) => {
+    const { loan_id, status, date, staff_name, serial_numbers } = req.body;
+  
+    try {
+      // Validate required fields
+      if (!loan_id || !status || !date) {
+        return res.status(400).json({ error: 'Missing required fields' });
+      }
+  
+      console.log("Received loan update data:", req.body);
+  
+      // Update the loan item in the database
+      const updatedLoanItem = await pool.query(
+        "UPDATE loan_transaction SET " + (status=="Borrowed"?"date_collected":"date_returned") + " = $1, status = $2, updated_by = $3 " + (status=="Borrowed" ? ",remarks = $5": "") + " WHERE transaction_id = $4 RETURNING *",
+        [date, status, staff_name, loan_id, ...(status === "Borrowed" ? [serial_numbers] : [])]
+      );
+  
+      if (updatedLoanItem.rows.length === 0) {
+        return res.status(404).json({ error: 'Loan item not found' });
+      }
 
+      // If item is marked as returned, update inventory (reduce reserved, increase available)
+      if (status === 'Completed') {
+        await pool.query(
+            `UPDATE hub_items_unique hi
+             SET qty_reserved = qty_reserved - li.quantity, 
+                qty_available = qty_available + li.quantity
+             FROM loan_items li
+             INNER JOIN loan_transaction lt ON lt.transaction_id = li.transaction_id
+             WHERE li.item_id = hi.item_id
+             AND lt.transaction_id = $1`,
+            [loan_id]
+        );
+    }
+  
+      // Return the updated loan item
+      return res.status(200).json(updatedLoanItem.rows[0]);
+  
+    } catch (err) {
+      console.error(err.stack);
+      return res.status(500).json({ error: 'Server error' });
+    }
+  });
 
 
 const formatDate = (date) => {
@@ -449,7 +733,7 @@ app.post('/api/submit-form', async (req, res) => {
         const {
             email, name, course_code, project_code,
             phone_number, start_usage_date, end_usage_date,
-            project_supervisor_name, supervisor_email
+            project_supervisor_name, supervisor_email, location
         } = req.body;
 
         console.log("Received form data:", req.body);
@@ -458,7 +742,7 @@ app.post('/api/submit-form', async (req, res) => {
         let formData = {
             completion_time: formatDate(new Date()),
             email, name, course_code, project_code,
-            phone_number, start_usage_date, end_usage_date
+            phone_number, start_usage_date, end_usage_date, location
         };
 
         // Optionally add supervisor info if present
@@ -512,31 +796,36 @@ app.post('/api/import-excel-data', async (req, res) => {
 
         client = await pool.connect();
         await client.query('BEGIN');
+        
+        console.log(record);
+        
+        if (record.Location=='hub' || record.Location=='e2a') {
+            const result = await client.query(`
+                INSERT INTO ` + (record.Location=='hub'? `hub_items_unique`: `e2a_items_unique`) +
+                `
+                (item_id, item_name, brand, total_qty, qty_available, qty_reserved, qty_borrowed, loanable, requires_approval, model, size_specs, category)
+                VALUES
+                ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+                ON CONFLICT (item_id)
+                DO UPDATE SET
+                item_name = EXCLUDED.item_name,
+                brand = EXCLUDED.brand,
+                total_qty = EXCLUDED.total_qty,
+                qty_available = EXCLUDED.qty_available,
+                qty_reserved = EXCLUDED.qty_reserved,
+                qty_borrowed = EXCLUDED.qty_borrowed,
+                loanable = EXCLUDED.loanable,
+                requires_approval = EXCLUDED.requires_approval,
+                model = EXCLUDED.model,
+                size_specs = EXCLUDED.size_specs,
+                category = EXCLUDED.category;
+            `, [
+                record.ItemID, record.ItemName, record.Brand, totalQty, qtyAvailable, qtyReserved, qtyBorrowed, loanable, requiresApproval, model, sizeSpecs, category
+            ]);
 
-        const result = await client.query(`
-            INSERT INTO hub_items_unique
-            (item_id, item_name, brand, total_qty, qty_available, qty_reserved, qty_borrowed, loanable, requires_approval, model, size_specs, category)
-            VALUES
-            ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
-            ON CONFLICT (item_id)
-            DO UPDATE SET
-            item_name = EXCLUDED.item_name,
-            brand = EXCLUDED.brand,
-            total_qty = EXCLUDED.total_qty,
-            qty_available = EXCLUDED.qty_available,
-            qty_reserved = EXCLUDED.qty_reserved,
-            qty_borrowed = EXCLUDED.qty_borrowed,
-            loanable = EXCLUDED.loanable,
-            requires_approval = EXCLUDED.requires_approval,
-            model = EXCLUDED.model,
-            size_specs = EXCLUDED.size_specs,
-            category = EXCLUDED.category;
-        `, [
-            record.ItemID, record.ItemName, record.Brand, totalQty, qtyAvailable, qtyReserved, qtyBorrowed, loanable, requiresApproval, model, sizeSpecs, category
-        ]);
-
-        await client.query('COMMIT');
-        res.status(200).json({ message: 'Data imported successfully', result: result.rows });
+            await client.query('COMMIT');
+            res.status(200).json({ message: 'Data imported successfully', result: result.rows });
+        }
     } catch (err) {
         console.error('Error during data import:', err);
         if (client) {
@@ -549,8 +838,6 @@ app.post('/api/import-excel-data', async (req, res) => {
         }
     }
 });
-
-
 
 
 app.listen(PORT, '0.0.0.0', () => {
