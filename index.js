@@ -104,7 +104,8 @@ app.get('/api/loan-transactions', async (req, res) => {
             lt.updated_by,
             lt.start_usage_date, 
             lt.end_usage_date, 
-            lt.status, 
+            lt.status,
+            lt.location,
             json_agg(
                 json_build_object(
                     'item_name', COALESCE(hi.item_name, hi2.item_name),
@@ -151,10 +152,11 @@ app.get('/api/loan-transactions', async (req, res) => {
             lt.end_usage_date, 
             lt.status,
             lt.hash,
-            COALESCE(
-                json_agg(
-                    json_build_object('item_name', hi.item_name, 'quantity', li.quantity)
-                ) FILTER (WHERE li.loan_item_id IS NOT NULL), '[]'
+            json_agg(
+                json_build_object(
+                    'item_name', COALESCE(hi.item_name, hi2.item_name),
+                    'quantity', COALESCE(li.quantity, li2.quantity)
+                )
             ) AS loan_items
         FROM 
             loan_transaction lt
@@ -164,6 +166,10 @@ app.get('/api/loan-transactions', async (req, res) => {
             loan_items li ON lt.transaction_id = li.transaction_id
         LEFT JOIN 
             hub_items_unique hi ON li.item_id = hi.item_id
+        LEFT JOIN 
+            loan_items_e2a li2 ON lt.transaction_id = li2.transaction_id
+        LEFT JOIN 
+            e2a_items_unique hi2 ON li2.item_id = hi2.item_id 
         WHERE 
             lt.end_usage_date < CURRENT_DATE AND lt.status = 'Borrowed'
         GROUP BY 
@@ -192,10 +198,11 @@ app.get('/api/loan-transactions', async (req, res) => {
             lt.end_usage_date, 
             lt.status, 
             lt.hash,
-            COALESCE(
-                json_agg(
-                    json_build_object('item_name', hi.item_name, 'quantity', li.quantity)
-                ) FILTER (WHERE li.loan_item_id IS NOT NULL), '[]'
+            json_agg(
+                json_build_object(
+                    'item_name', COALESCE(hi.item_name, hi2.item_name),
+                    'quantity', COALESCE(li.quantity, li2.quantity)
+                )
             ) AS loan_items
         FROM 
             loan_transaction lt
@@ -205,6 +212,10 @@ app.get('/api/loan-transactions', async (req, res) => {
             loan_items li ON lt.transaction_id = li.transaction_id
         LEFT JOIN 
             hub_items_unique hi ON li.item_id = hi.item_id
+        LEFT JOIN 
+            loan_items_e2a li2 ON lt.transaction_id = li2.transaction_id
+        LEFT JOIN 
+            e2a_items_unique hi2 ON li2.item_id = hi2.item_id 
         WHERE 
             lt.end_usage_date = CURRENT_DATE + INTERVAL '1 day'
         GROUP BY 
@@ -596,10 +607,10 @@ app.get('/api/get-transaction-id', async (req, res) => {
 app.post('/api/loan-transaction/add', async (req, res) => {
     try {
         // Destructure the required data from the request body
-        const { student_id, email, start_usage_date, end_usage_date, status } = req.body;
+        const { student_id, email, start_usage_date, end_usage_date, status, location } = req.body;
 
         // Basic validation to check if all required fields are present
-        if (!student_id || !email || !start_usage_date || !end_usage_date || !status) {
+        if (!student_id || !email || !start_usage_date || !end_usage_date || !status || !location) {
             return res.status(400).json({ error: 'Missing required fields' });
         }
 
@@ -620,8 +631,8 @@ app.post('/api/loan-transaction/add', async (req, res) => {
 
         // Insert the new loan transaction data into the loan_transaction table using the student_id from the database
         const newLoanTransaction = await pool.query(
-            "INSERT INTO loan_transaction (student_id, start_usage_date, end_usage_date, status, email, phone_number) VALUES ($1, $2, $3, $4, $5, $6) RETURNING *",
-            [studentIdFromDB, start_usage_date, end_usage_date, status, email, phoneNumberFromDB]
+            "INSERT INTO loan_transaction (student_id, start_usage_date, end_usage_date, status, email, phone_number, location) VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *",
+            [studentIdFromDB, start_usage_date, end_usage_date, status, email, phoneNumberFromDB, location]
         );
 
         // Generate the hash for the transaction_id (safer)
@@ -670,43 +681,79 @@ app.post('/api/loan-item/add', async (req, res) => {
     const { loan_id, status, date, staff_name, serial_numbers } = req.body;
   
     try {
-      // Validate required fields
-      if (!loan_id || !status || !date) {
-        return res.status(400).json({ error: 'Missing required fields' });
-      }
-  
-      console.log("Received loan update data:", req.body);
-  
-      // Update the loan item in the database
-      const updatedLoanItem = await pool.query(
-        "UPDATE loan_transaction SET " + (status=="Borrowed"?"date_collected":"date_returned") + " = $1, status = $2, updated_by = $3 " + (status=="Borrowed" ? ",remarks = $5": "") + " WHERE transaction_id = $4 RETURNING *",
-        [date, status, staff_name, loan_id, ...(status === "Borrowed" ? [serial_numbers] : [])]
-      );
+        // Validate required fields
+        if (!loan_id || !status) {
+            return res.status(400).json({ error: 'Missing required fields' });
+        }
+    
+        console.log("Received loan update data:", req.body);
+    
+        // Update the loan item in the database
+        var updatedLoanItem;
+      
+        if (status === 'Rejected') {
+            updatedLoanItem = await pool.query(
+                "UPDATE loan_transaction SET status = $1 WHERE transaction_id = $2 RETURNING *",
+                [status, loan_id]
+            );
+        } else if (status === 'Completed') {
+            updatedLoanItem = await pool.query(
+                "UPDATE loan_transaction SET date_returned = $1, status = $2, updated_by = $3 WHERE transaction_id = $4 RETURNING *",
+                [date, status, staff_name, loan_id]
+            );
+        }  else if (status === 'Borrowed') {
+            updatedLoanItem = await pool.query(
+                "UPDATE loan_transaction SET date_collected = $1, status = $2, updated_by = $3 ,remarks = $4 WHERE transaction_id = $5 RETURNING *",
+                [date, status, staff_name, serial_numbers, loan_id]
+            );
+        }
   
       if (updatedLoanItem.rows.length === 0) {
         return res.status(404).json({ error: 'Loan item not found' });
       }
 
-      // If item is marked as returned, update inventory (reduce reserved, increase available)
-      if (status === 'Completed') {
-        await pool.query(
-            `UPDATE hub_items_unique hi
-             SET qty_reserved = qty_reserved - li.quantity, 
-                qty_available = qty_available + li.quantity
-             FROM loan_items li
-             INNER JOIN loan_transaction lt ON lt.transaction_id = li.transaction_id
-             WHERE li.item_id = hi.item_id
-             AND lt.transaction_id = $1`,
-            [loan_id]
-        );
-    }
+        // If item is marked as returned, update inventory (reduce reserved, increase available)
+        if (status === 'Rejected')
+            await pool.query(
+                `UPDATE hub_items_unique hi
+                SET qty_reserved = qty_reserved - li.quantity, 
+                    qty_available = qty_available + li.quantity
+                FROM loan_items li
+                INNER JOIN loan_transaction lt ON lt.transaction_id = li.transaction_id
+                WHERE li.item_id = hi.item_id
+                AND lt.transaction_id = $1`,
+                [loan_id]
+            );
+        else if (status === 'Completed')
+            await pool.query(
+                `UPDATE hub_items_unique hi
+                SET qty_borrowed = qty_borrowed - li.quantity, 
+                    qty_available = qty_available + li.quantity
+                FROM loan_items li
+                INNER JOIN loan_transaction lt ON lt.transaction_id = li.transaction_id
+                WHERE li.item_id = hi.item_id
+                AND lt.transaction_id = $1`,
+                [loan_id]
+            );
+        else if (status === 'Borrowed')
+            await pool.query(
+                `UPDATE hub_items_unique hi
+                SET qty_reserved = qty_reserved - li.quantity, 
+                    qty_borrowed = qty_borrowed + li.quantity
+                FROM loan_items li
+                INNER JOIN loan_transaction lt ON lt.transaction_id = li.transaction_id
+                WHERE li.item_id = hi.item_id
+                AND lt.transaction_id = $1`,
+                [loan_id]
+            );
+        
   
-      // Return the updated loan item
-      return res.status(200).json(updatedLoanItem.rows[0]);
+        // Return the updated loan item
+        return res.status(200).json(updatedLoanItem.rows[0]);
   
     } catch (err) {
-      console.error(err.stack);
-      return res.status(500).json({ error: 'Server error' });
+        console.error(err.stack);
+        return res.status(500).json({ error: 'Server error' });
     }
   });
 
