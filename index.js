@@ -559,7 +559,7 @@ app.get('/api/get-student-id', async (req, res) => {
         }
 
         // Query the database to find the student_id by email
-        const studentResult = await pool.query('SELECT student_id FROM students WHERE email = $1', [email]);
+        const studentResult = await pool.query('SELECT student_id FROM students WHERE email ILIKE $1', [email]);
 
         if (studentResult.rows.length > 0) {
             // Student found, return the student_id
